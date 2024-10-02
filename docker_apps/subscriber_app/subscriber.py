@@ -1,10 +1,19 @@
 import os
-import asyncio
+import logging
 import redis.asyncio
 
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
 from contextlib import asynccontextmanager
+from redis.exceptions import ConnectionError
+
+log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
+logging.basicConfig(
+    level=log_level,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+)
+logger = logging.getLogger(__name__)
 
 
 html = """
@@ -18,7 +27,7 @@ html = """
         <ul id="messages"></ul>
         <script>
             const ws_scheme = window.location.protocol === "https:" ? "wss" : "ws";
-            const ws_url = ws_scheme + "://" + window.location.hostname + ":8000/ws";
+            const ws_url = ws_scheme + "://" + window.location.host + "/ws";
             const ws = new WebSocket(ws_url);
             ws.onmessage = function(event) {
                 const messages = document.getElementById('messages');
@@ -36,14 +45,14 @@ redis_port = int(os.getenv('REDIS_PORT', 6379))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print(f"Attempting to connect to redis at {redis_host}:{redis_port}")
+    logger.info(f"Attempting to connect to redis at {redis_host}:{redis_port}")
     app.state.redis = redis.asyncio.Redis(
         host=redis_host,
         port=redis_port,
         socket_connect_timeout=5,
         socket_keepalive=True,
     )
-    print("Connected")
+    logger.info("Connected")
     yield
     await app.state.redis.close()
 
@@ -59,20 +68,24 @@ async def get():
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    print("accepted websocket connection")
+    logger.info("accepted websocket connection")
     try:
-        pubsub = app.state.redis.pubsub()
-        await pubsub.subscribe('hello_channel')
-        print("subscribed to hellow_channel")
-        while True:
-            message = await pubsub.get_message(ignore_subscribe_messages=True)
-            if message:
-                print("Received message from Redis")
-                await websocket.send_text(message['data'].decode())
-            await asyncio.sleep(0.1)
+        async with app.state.redis.pubsub() as pubsub:
+            logger.info("created pubsub")
+            await pubsub.subscribe('hello_channel')
+            logger.info("subscribed to hello_channel")
+            async for message in pubsub.listen():
+                if message['type'] == 'message':
+                    logger.info("Received message from Redis")
+                    await websocket.send_text(message['data'].decode())
+
+    except ConnectionError as e:
+        logger.error(f"Redis connection error: \n{e}")
     except Exception as e:
-        print(f"WebSocket connection error: {e}")
+        logger.error(f"Error: \n{e}")
     finally:
-        await pubsub.unsubscribe('hello_channel')
-        await pubsub.close()
+        await websocket.close()
+        if pubsub:
+            await pubsub.unsubscribe('hello_channel')
+            await pubsub.close()
 

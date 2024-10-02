@@ -35,9 +35,10 @@ kind: Service
 metadata:
   name: subscriber-service
 spec:
-  type: LoadBalancer
+  type: NodePort
   ports:
     - port: 8000
       targetPort: 8000
+      nodePort: 30007
   selector:
     app: subscriber
